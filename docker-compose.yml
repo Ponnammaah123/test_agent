@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  ssqe-orchestrator:
+    # ... (build, container_name, env_file)
+    build: .
+    container_name: ssqe-orchestrator
+    env_file:
+      - .env
+      
+    ports:
+      - "8080:8080"
+      
+    # This volume mount ensures the logs directory exists on your host 
+    # and is synced with the container's logs directory.
+    volumes:
+      - ./logs:/app/logs
+      
+    command: ["python", "main.py", "--mode", "webhook"]
+    
+    # ... (healthcheck, restart)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
