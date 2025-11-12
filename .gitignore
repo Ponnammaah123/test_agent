@@ -1,0 +1,99 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.coverage
+.mypy_cache/
+.pytest_cache/
+.htmlcov/
+
+
+# Python bytecode files
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Python virtual environment
+venv/
+.env/
+.venv/
+env/
+.envrc
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Dependency directories
+node_modules/
+bower_components/
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.tar.gz
+*.deb
+*.rpm
+
+# Flask specific
+instance/
+.webassets-cache/
+
+# Django specific
+*.log
+*.pot
+*.pyc
+*.pyo
+*.sqlite3
+*.db
+*.bak
+*.swp
+*.idea/
+
+# Test and coverage reports
+*.coverage
+*.hypothesis/
+nosetests.xml
+coverage.xml
+*.cover
+*.tox/
+*.nox/
+*.coverage.*
+*.hypothesis/
+
+# Sphinx documentation
+docs/_build/
+
+# PyInstaller
+*.spec
+
+# MyPy
+.mypy_cache/
+
+# Pytest
+.cache/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Env files
+*.env
+*.flaskenv
+
+# Mac OS
+.DS_Store
+
+# Windows
+Thumbs.db
+.qodo
+

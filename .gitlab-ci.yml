@@ -1,0 +1,75 @@
+stages:
+  - cleanup
+  - build
+  - deploy
+
+variables:
+  GCP_PROJECT_ID: "sap-genai-playground-dev-mg"
+  GKE_CLUSTER_NAME: "ps-lbg-dev-cluster"
+  GKE_ZONE: "us-central1-c"
+  IMAGE_NAME: "us-central1-docker.pkg.dev/sap-genai-playground-dev-mg/ps-lbg-artifacts/ssqe-orchestrator"
+  NAMESPACE: "finoptix-ns"
+
+cleanup:
+  stage: cleanup
+  image: docker:28.5.2
+  services:
+    - name: docker:dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  tags:
+    - gcp
+  only:
+    - main
+  script:
+    - docker system prune -af --volumes
+    - docker builder prune -af
+  allow_failure: true
+
+build:
+  stage: build
+  image: docker:28.5.2
+  services:
+    - name: docker:dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  tags:
+    - gcp
+  only:
+    - main
+  before_script:
+    - until docker info; do sleep 1; done
+    - apk add --no-cache curl python3 py3-pip
+    - curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-458.0.0-linux-x86_64.tar.gz
+    - tar -xf google-cloud-sdk-458.0.0-linux-x86_64.tar.gz
+    - ./google-cloud-sdk/install.sh --quiet
+    - export PATH=$PATH:$(pwd)/google-cloud-sdk/bin
+    - echo $GCP_SERVICE_KEY | base64 -d > ${HOME}/gcp-key.json
+    - gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
+    - gcloud config set project $GCP_PROJECT_ID
+    - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+  script:
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHORT_SHA .
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+
+deploy:
+  stage: deploy
+  image: google/cloud-sdk:latest
+  tags:
+    - gcp
+  only:
+    - main
+  before_script:
+    - echo $GCP_SERVICE_KEY | base64 -d > ${HOME}/gcp-key.json
+    - gcloud auth activate-service-account --key-file ${HOME}/gcp-key.json
+    - gcloud config set project $GCP_PROJECT_ID
+    - gcloud container clusters get-credentials $GKE_CLUSTER_NAME --zone $GKE_ZONE
+    - apt-get update && apt-get install -y gettext-base
+  script:
+    - sed -i "s|IMAGE_TAG|$CI_COMMIT_SHORT_SHA|g" k8s/deployment-svc.yaml
+    - kubectl apply -f k8s/deployment-svc.yaml
+    - kubectl apply -f k8s/virtual-svc.yaml
+    - envsubst < k8s/secret.yaml | kubectl apply -f -
+    - kubectl rollout status deployment/ssqe-orchestrator -n $NAMESPACE

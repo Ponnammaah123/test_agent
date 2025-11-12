@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssqe-orchestrator
+  namespace: finoptix-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ssqe-orchestrator
+  template:
+    metadata:
+      labels:
+        app: ssqe-orchestrator
+    spec:
+      containers:
+      - name: ssqe-orchestrator
+        image: us-central1-docker.pkg.dev/sap-genai-playground-dev-mg/ps-lbg-artifacts/ssqe-orchestrator:IMAGE_TAG
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: ROOT_PATH
+          value: /ssqe-orchestrator
+        - name: JIRA_SERVER
+          value: https://publicissapient-dojo-training.atlassian.net
+        - name: JIRA_EMAIL
+          value: shweta.fatnani@publicissapient.com
+        - name: JIRA_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: jira-api-token
+              name: ssqe-orchestrator
+        - name: JIRA_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              key: jira-webhook-secret
+              name: ssqe-orchestrator
+        - name: QE_AGENT_NAME
+          value: QE Agent
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: github-token
+              name: ssqe-orchestrator
+        - name: GITHUB_REPO
+          value: shwetainsapient/lloyds-bank-pca-app
+        - name: TEST_REPO_URL
+          value: shwetainsapient/lloyds-bank-pca-app-tests
+        - name: EMAIL_SMTP_SERVER
+          value: emeadmzrelay.publicisgroupe.net
+        - name: EMAIL_SMTP_PORT
+          value: "25"
+        - name: EMAIL_USERNAME
+          value: shweta.fatnani@publicissapient.com
+        - name: EMAIL_PASSWORD
+        - name: EMAIL_FROM
+          value: noreplylcore@publicissapient.com
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: gemini-api-key
+              name: ssqe-orchestrator
+        - name: GEMINI_MODEL
+          value: gemini-2.0-flash
+        - name: GEMINI_TEMPERATURE
+          value: "0.7"
+        - name: GEMINI_MAX_TOKENS
+          value: "2048"
+        - name: GCP_PROJECT_ID
+          value: sap-genai-playground-dev-mg
+        - name: WEBHOOK_HOST
+          value: 0.0.0.0
+        - name: WEBHOOK_PORT
+          value: "8080"
+        - name: DEBUG
+          value: "False"
+        - name: WORKERS
+          value: "4"
+        - name: AUTOMATION_SECRET_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: automation-secret-token
+              name: ssqe-orchestrator
+        - name: PLAYWRIGHT_DOCKER_IMAGE
+          value: mcr.microsoft.com/playwright:latest
+        - name: MAX_SELF_HEAL_ITERATIONS
+          value: "3"
+        - name: TEST_EXECUTION_TIMEOUT
+          value: "600"
+        - name: GCP_PROJECT_ID
+          value: "sap-genai-playground-dev-mg"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssqe-orchestrator
+  namespace: finoptix-ns
+spec:
+  type: ClusterIP
+  selector:
+    app: ssqe-orchestrator
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080

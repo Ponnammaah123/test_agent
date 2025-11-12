@@ -1,0 +1,24 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: ssqe-orchestrator
+  namespace: finoptix-ns
+  annotations:
+    meta.helm.sh/release-name: ssqe-orchestrator
+    meta.helm.sh/release-namespace: finoptix-ns
+  labels:
+    app.kubernetes.io/managed-by: Helm
+spec:
+  gateways:
+  - istio-system/ps-lbg-gateway
+  hosts:
+  - gcp.psai.dev
+  http:
+  - match:
+    - uri:
+        prefix: /ssqe-orchestrator
+    route:
+    - destination:
+        host: ssqe-orchestrator.finoptix-ns.svc.cluster.local
+        port:
+          number: 80
