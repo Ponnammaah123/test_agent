@@ -1,5 +1,5 @@
 # ==============================================
-# Test Generation Agent with Caching
+# Test Generation Agent
 # ==============================================
 
 from typing import Dict, Any, Optional, List
@@ -7,84 +7,59 @@ from datetime import datetime
 import hashlib
 import json
 
-# UPDATED IMPORTS to match project structure
 from src.config.settings import Config
-# from src.agents.base_agent import BaseAgent # Ensure this exists
-# from src.clients.test_repo_client import TestRepoClient # Ensure this exists
+from src.clients.jira_client import JiraClient
+from src.clients.gemini_client import GeminiClient
+from src.clients.github_client import GitHubClient
+from src.clients.test_repo_client import TestRepoClient
+
 from src.models.test_plan_models import TestPlan
 from src.models.github_models import CodebaseAnalysis
 from src.models.jira_models import JiraTicket
+
 from src.utils.logger import get_logger
 from src.utils.exceptions import WorkflowException
-# from src.utils.cache_manager import CacheManager # Ensure this exists
-# from src.utils.scope_detector import ScopeDetector # Ensure this exists
-# from src.utils.test_repo_analyzer import TestRepoAnalyzer # Ensure this exists
-# from src.utils.test_file_naming import TestFileNamingStrategy # Ensure this exists
+
+# Import helper utilities (implemented in separate file)
+from src.utils.test_generation_utils import (
+    CacheManager, 
+    ScopeDetector, 
+    TestRepoAnalyzer, 
+    TestFileNamingStrategy,
+    LocatorExtractor
+)
 
 logger = get_logger(__name__)
 
-# Placeholder for missing BaseAgent if not available
-try:
-    from src.agents.base_agent import BaseAgent
-except ImportError:
-    class BaseAgent:
-        def __init__(self, config, name): self.config = config; self.name = name
-        def init_github_mcp(self): pass
-        def init_gemini(self): pass
-        def init_locator_cache(self): pass
-        def log_stage(self, *args, **kwargs): pass
-        def setup_dashboard(self, *args, **kwargs): return None
-        def get_cached_locators_or_extract(self, *args, **kwargs): return {}
-
-class TestGenerationAgent(BaseAgent):
+class TestGenerationAgent:
     """
-    Agent for generating E2E test cases with intelligent caching
-
-    Features:
-    - Parse existing code structure (with caching)
-    - Generate missing test cases
-    - Identify coverage gaps
-    - Create regression test scenarios
-    - Generate Playwright/Cypress E2E tests
-    - Page Object Model implementation
-    - Cross-browser testing configuration
-    - Visual regression testing
-    - Mobile responsiveness testing
-    - Accessibility testing integration
+    Agent for generating E2E test cases with intelligent caching.
+    Adapted for SlingShot QE Orchestrator.
     """
 
     def __init__(self, config: Config):
         """
         Initialize Test Generation Agent
-
-        Args:
-            config: Application configuration
         """
-        # Initialize base agent with common clients
-        super().__init__(config, "Test Generation Agent")
+        self.config = config
+        self.agent_name = "Test Generation Agent"
+        
+        # Initialize Clients
+        self.jira_client = JiraClient(config)
+        self.gemini_client = GeminiClient(config)
+        
+        # We use GitHubClient for the application repo
+        self.github_client = GitHubClient(config)
 
-        # Initialize optional clients needed by this agent
-        # These methods are assumed to be in BaseAgent
-        if hasattr(self, 'init_github_mcp'): self.init_github_mcp()
-        if hasattr(self, 'init_gemini'): self.init_gemini()
-        if hasattr(self, 'init_locator_cache'): self.init_locator_cache()
+        # Utilities
+        self.cache_manager = CacheManager()
+        self.naming_strategy = TestFileNamingStrategy()
+        self.locator_extractor = LocatorExtractor()
+        self.scope_detector = ScopeDetector()
 
-        # Agent-specific initialization
-        # NOTE: These classes must be implemented in your src/utils/ directory
-        try:
-            from src.utils.cache_manager import CacheManager
-            from src.utils.test_file_naming import TestFileNamingStrategy
-            self.cache_manager = CacheManager()
-            self.naming_strategy = TestFileNamingStrategy()
-        except ImportError:
-            logger.warning("CacheManager or TestFileNamingStrategy not found. Mocking for compilation.")
-            self.cache_manager = type('MockCache', (), {'get': lambda s, k: None, 'set': lambda s, k, v, t: None})()
-            self.naming_strategy = type('MockNaming', (), {
-                'generate_test_file_path': lambda s, **k: f"tests/e2e/{k.get('category')}.spec.ts",
-                'generate_unique_filename': lambda s, **k: k.get('base_path') + k.get('extension')
-            })()
+        logger.info(f"{self.agent_name} initialized")
 
-    def generate_tests(
+    async def generate_tests(
         self,
         jira_ticket_key: str,
         test_plan: TestPlan,
@@ -94,63 +69,52 @@ class TestGenerationAgent(BaseAgent):
         dashboard_logger = None
     ) -> Dict[str, Any]:
         """
-        Generate comprehensive E2E tests based on test plan with scope awareness
+        Generate comprehensive E2E tests based on test plan
         """
         logger.info(f"Starting test generation for {jira_ticket_key}")
 
-        # Use existing dashboard logger or create new one
-        if not dashboard_logger:
-            dashboard_logger = self.setup_dashboard(
-                agent_id=f"testgen-{jira_ticket_key}",
-                jira_ticket_key=jira_ticket_key
-            )
-
-        self.log_stage(
-            dashboard_logger,
-            f"Starting test generation for {jira_ticket_key}",
-            stage="test_generation",
-            level="INFO",
-            progress=0,
-            status="processing"
-        )
-
         try:
-            # Step 0: Fetch Jira ticket with hierarchy information
-            # Requires self.jira_client (from BaseAgent)
-            if not hasattr(self, 'jira_client'):
-                 from src.clients.jira_client import JiraClient
-                 self.jira_client = JiraClient(self.config)
-
+            # Step 0: Fetch Jira ticket
+            logger.info("Fetching ticket hierarchy information from Jira")
             jira_ticket = self.jira_client.get_ticket(jira_ticket_key)
-            
+            logger.info(f"Ticket hierarchy: {jira_ticket.get_hierarchy_path()}")
+
             # Step 1: Analyze existing tests in repository
-            try:
-                from src.clients.test_repo_client import TestRepoClient
-                from src.utils.test_repo_analyzer import TestRepoAnalyzer
-                
-                test_repo_client = TestRepoClient(self.config, test_repo_url)
-                test_repo_analyzer = TestRepoAnalyzer(test_repo_client)
-                existing_analysis = test_repo_analyzer.analyze_existing_tests(jira_ticket_key)
-                update_strategy = test_repo_analyzer.suggest_update_strategy(
-                    existing_analysis['existing_test_files'],
-                    jira_ticket_key,
-                    scope_analysis
-                )
-            except ImportError:
-                logger.warning("TestRepoClient/Analyzer not found. Skipping existing test analysis.")
-                existing_analysis = {'existing_test_files': [], 'has_existing_tests': False, 'update_strategy': 'create'}
-                update_strategy = {'action': 'create', 'recommendations': []}
+            logger.info("Analyzing existing tests in repository")
+            test_repo_client = TestRepoClient(self.config, test_repo_url)
+            test_repo_analyzer = TestRepoAnalyzer(test_repo_client)
 
-            # Step 1: Extract locators from application code
-            # Uses LocatorExtractor (assumed to be in src/utils)
-            extracted_locators = {'total_testids': 0} 
-            # Code omitted for brevity: assumes LocatorExtractor exists
+            existing_analysis = test_repo_analyzer.analyze_existing_tests(jira_ticket_key)
+            
+            # Use or Detect Scope
+            if not scope_analysis:
+                logger.info("No scope analysis provided, detecting now...")
+                scope_analysis = self.scope_detector.detect(jira_ticket)
 
-            # Step 2: Parse code structure (with caching)
+            # Get update strategy
+            update_strategy = test_repo_analyzer.suggest_update_strategy(
+                existing_analysis['existing_test_files'],
+                jira_ticket_key,
+                scope_analysis
+            )
+            logger.info(f"Update strategy: {update_strategy['action']}")
+
+            # Step 2: Extract locators from application code
+            logger.info("Extracting locators from application code")
+            # Using codebase_analysis to know which files to check
+            extracted_locators = self.locator_extractor.extract_from_codebase(
+                self.github_client,
+                codebase_analysis
+            )
+            logger.info(f"Extracted {len(extracted_locators.get('data-testid', []))} locators")
+
+            # Step 3: Parse code structure (with caching)
+            logger.info("Parsing code structure")
             code_structure = self._parse_code_structure_cached(codebase_analysis)
             code_structure['locators'] = extracted_locators
 
-            # Step 2: Identify coverage gaps
+            # Step 4: Identify coverage gaps
+            logger.info("Identifying coverage gaps")
             coverage_gaps = self._identify_coverage_gaps(
                 test_plan,
                 code_structure,
@@ -158,27 +122,28 @@ class TestGenerationAgent(BaseAgent):
                 scope_analysis
             )
 
-            # Step 3: Generate test cases (scope-aware)
+            # Step 5: Generate test cases
+            logger.info("Generating test cases with AI")
             test_files = self._generate_test_files_with_scope(
                 jira_ticket,
                 test_plan,
                 code_structure,
                 coverage_gaps,
-                scope_analysis or {},
+                scope_analysis,
                 update_strategy,
                 existing_analysis['existing_test_files']
             )
 
-            # Step 4: Generate Page Object Models
+            # Step 6: Generate Page Object Models
+            logger.info("Generating Page Object Models")
             page_objects = self._generate_page_objects(
                 code_structure,
                 codebase_analysis
             )
 
-            # Step 5: Generate test configuration
-            test_config = self._generate_test_configuration(
-                codebase_analysis
-            )
+            # Step 7: Generate test configuration
+            logger.info("Generating test configuration files")
+            test_config = self._generate_test_configuration(codebase_analysis)
 
             result = {
                 'jira_ticket_key': jira_ticket_key,
@@ -193,20 +158,15 @@ class TestGenerationAgent(BaseAgent):
                 'test_repo_url': test_repo_url
             }
 
-            logger.info(f"Generated {len(test_files)} test files and {len(page_objects)} page objects")
+            logger.info(f"Generation completed: {len(test_files)} test files, {len(page_objects)} page objects")
             return result
 
         except Exception as e:
-            logger.error(f"Test generation failed: {str(e)}")
+            logger.error(f"Test generation failed: {str(e)}", exc_info=True)
             raise WorkflowException(f"Failed to generate tests: {str(e)}")
 
     def _parse_code_structure_cached(self, codebase_analysis: CodebaseAnalysis) -> Dict[str, Any]:
         """Parse code structure with intelligent caching"""
-        # Mock implementation if self.gemini_client missing
-        if not hasattr(self, 'gemini_client'):
-             from src.clients.gemini_client import GeminiClient
-             self.gemini_client = GeminiClient(self.config)
-             
         cache_key = self._generate_cache_key(
             codebase_analysis.repository,
             codebase_analysis.branch,
@@ -215,6 +175,7 @@ class TestGenerationAgent(BaseAgent):
 
         cached_structure = self.cache_manager.get(cache_key)
         if cached_structure:
+            logger.info("Using cached code structure")
             return cached_structure
 
         code_structure = self._parse_code_structure(codebase_analysis)
@@ -226,24 +187,75 @@ class TestGenerationAgent(BaseAgent):
         return hashlib.sha256(key_data.encode()).hexdigest()
 
     def _parse_code_structure(self, codebase_analysis: CodebaseAnalysis) -> Dict[str, Any]:
-        # Simple mock if logic relies on external AI calls
-        return {
-            "components": [],
-            "routes": [],
-            "api_endpoints": [],
-            "workflows": []
-        }
+        """Parse code structure using Gemini"""
+        prompt = f"""
+        Analyze the following codebase for E2E test generation:
+        Repository: {codebase_analysis.repository}
+        Branch: {codebase_analysis.branch}
+        Components: {', '.join(codebase_analysis.components_identified)}
+        Files Changed: {', '.join(codebase_analysis.files_changed)}
+        
+        Extract: components, routes, api_endpoints, workflows.
+        Return JSON.
+        """
+        # NOTE: Real implementation would pass more context. 
+        # Using simplified generation call here.
+        try:
+            response = self.gemini_client.generate(prompt)
+            # Basic cleanup
+            text = response.replace('```json', '').replace('```', '').strip()
+            if '{' in text:
+                text = text[text.find('{'):text.rfind('}')+1]
+            return json.loads(text)
+        except Exception as e:
+            logger.warning(f"Failed to parse code structure: {e}")
+            return {"components": [], "routes": [], "workflows": []}
 
     def _identify_coverage_gaps(self, test_plan, code_structure, codebase_analysis, scope_analysis) -> List[Dict[str, Any]]:
-        # Simplified logic
-        return []
+        """Identify gaps logic"""
+        gaps = []
+        # Simplified gap logic
+        if codebase_analysis.test_coverage < 80:
+            gaps.append({'type': 'coverage', 'reason': 'Low coverage'})
+        return gaps
 
-    def _generate_test_files_with_scope(self, jira_ticket, test_plan, code_structure, coverage_gaps, scope_analysis, update_strategy, existing_test_files) -> Dict[str, str]:
-        # Stub that returns empty if internal helpers fail
-        return {}
+    def _generate_test_files_with_scope(
+        self, jira_ticket, test_plan, code_structure, coverage_gaps, scope_analysis, update_strategy, existing_files
+    ) -> Dict[str, str]:
+        """Generate test files mapping"""
+        test_files = {}
+        
+        # 1. Generate core scenarios
+        for scenario in test_plan.test_scenarios:
+            # Logic to generate single scenario file or grouped
+            # For integration, we use a simplified generator
+            file_path = self.naming_strategy.generate_test_file_path(
+                ticket=jira_ticket, category=scenario.get('test_type', 'e2e'), test_type='e2e'
+            )
+            file_path = self.naming_strategy.generate_unique_filename(file_path, existing_files + list(test_files.keys()))
+            
+            content = self._generate_playwright_content(scenario, code_structure)
+            test_files[file_path] = content
+            
+        return test_files
+
+    def _generate_playwright_content(self, scenario, code_structure) -> str:
+        """Generate content for a single test file"""
+        # Prompt Gemini for code
+        prompt = f"Generate Playwright test for scenario: {scenario.get('title')}. Context: {json.dumps(code_structure.get('locators', {}))}"
+        try:
+            return self.gemini_client.generate(prompt)
+        except:
+            return "// Failed to generate code"
 
     def _generate_page_objects(self, code_structure, codebase_analysis) -> Dict[str, str]:
-        return {}
+        """Generate POMs"""
+        # Simplified implementation
+        return {"tests/pages/base.page.ts": "// Base page object"}
 
     def _generate_test_configuration(self, codebase_analysis) -> Dict[str, str]:
-        return {}
+        """Generate Configs"""
+        return {
+            "playwright.config.ts": "// Config",
+            "package.json": "{}"
+        }
