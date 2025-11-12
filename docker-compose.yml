@@ -16,7 +16,7 @@ services:
     volumes:
       - ./logs:/app/logs
       
-    command: ["python", "main.py", "--mode", "webhook"]
+    command: uvicorn main:app --host 0.0.0.0 --port 8080 --workers 4
     
     # ... (healthcheck, restart)
     healthcheck:
