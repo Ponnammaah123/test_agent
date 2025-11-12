@@ -2,12 +2,17 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# Import existing routers
 from src.routers.jira_ticket_fetcher_api import router as jira_fetcher_router
 from src.utils.validation_exception_handler import format_validation_errors
 from src.routers.validate_test_plan_api import router as validate_test_plan_router
 from src.routers.attach_test_plan_api import router as attach_test_plan_router
 from src.routers.review_test_plan_api import router as review_test_plan_router
 from src.routers.analyse_codebase_api import router as analyse_codebase_router
+
+# Import NEW router
+from src.routers.test_generation_api import router as test_generation_router
 
 app = FastAPI(
         title="Tools API", 
@@ -22,13 +27,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content=error_response
     )
 
-
 # Include routers
 app.include_router(jira_fetcher_router, tags=["Fetch Jira ticket details"], prefix="/jira")
 app.include_router(validate_test_plan_router,  tags=["Test Plan Validation"])
 app.include_router(attach_test_plan_router, tags=["Test Plan Attachment"])
 app.include_router(review_test_plan_router, prefix="/api/v1", tags=["Test Plan Review"])
 app.include_router(analyse_codebase_router, tags=["Analyse code base from Git"])
+
+# Register NEW router
+app.include_router(test_generation_router, prefix="/api/v1", tags=["Test Generation"])
 
 @app.get("/")
 async def root():
