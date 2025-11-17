@@ -48,16 +48,51 @@ class TestRepoAnalyzer:
 
 class TestFileNamingStrategy:
     """Handles naming conventions for test files"""
-    def generate_test_file_path(self, ticket: JiraTicket, category: str, test_type: str) -> str:
-        # e.g. tests/e2e/story-123/functional.spec.ts
-        clean_key = ticket.key.lower()
-        return f"tests/e2e/{clean_key}/{category.lower()}.spec.ts"
     
-    def generate_unique_filename(self, base_path: str, existing_files: List[str], extension: str = ".spec.ts") -> str:
+    def generate_test_file_path(self, ticket: JiraTicket, scenario: Dict[str, Any], test_type: str) -> str:
+        """
+        FIXED: Generates a unique path for each scenario using its ID.
+        """
+        clean_key = ticket.key.lower()
+        
+        # Get scenario ID, default to a random string if not present
+        scenario_id_raw = scenario.get('id')
+        if not scenario_id_raw:
+            scenario_id_raw = f"scenario-{hashlib.md5(scenario.get('title','').encode()).hexdigest()[:6]}"
+
+        # Sanitize ID (e.g., "TS-001" -> "ts-001")
+        clean_scenario_id = str(scenario_id_raw).lower().replace(" ", "-").replace("_", "-")
+
+        # e.g. tests/e2e/qea-19/ts-001.spec.ts
+        return f"tests/e2e/{clean_key}/{clean_scenario_id}.spec.ts"
+    
+    def generate_unique_filename(self, base_path: str, existing_files: List[str]) -> str:
+        """
+        FIXED: Robustly handles name clashes by incrementing a counter.
+        """
         if base_path not in existing_files:
             return base_path
-        # Simple increment logic could be added here
-        return base_path.replace(extension, f"-new{extension}")
+        
+        # Separate name and extension
+        # This handles complex extensions like .spec.ts
+        parts = base_path.rsplit('.', 2)
+        if len(parts) == 3 and parts[1] == 'spec': # Handle .spec.ts
+            base_name = parts[0]
+            extension = f".{parts[1]}.{parts[2]}"
+        else:
+            # Handle simple extensions like .ts, .js
+            parts = base_path.rsplit('.', 1)
+            base_name = parts[0] if len(parts) > 1 else base_path
+            extension = f".{parts[1]}" if len(parts) > 1 else ""
+
+        i = 1
+        new_path = f"{base_name}-{i}{extension}"
+        
+        while new_path in existing_files:
+            i += 1
+            new_path = f"{base_name}-{i}{extension}"
+            
+        return new_path
 
 class LocatorExtractor:
     """Extracts data-testid and ids from codebase"""

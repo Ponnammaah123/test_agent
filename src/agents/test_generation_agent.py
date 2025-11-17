@@ -246,12 +246,21 @@ class TestGenerationAgent:
         
         # 1. Generate core scenarios
         for scenario in test_plan.test_scenarios:
-            # Logic to generate single scenario file or grouped
-            # For integration, we use a simplified generator
+            
+            # --- FIX: Start ---
+            # Pass the entire scenario object to the naming strategy
             file_path = self.naming_strategy.generate_test_file_path(
-                ticket=jira_ticket, category=scenario.get('test_type', 'e2e'), test_type='e2e'
+                ticket=jira_ticket, 
+                scenario=scenario,  # Pass the scenario
+                test_type=scenario.get('test_type', 'e2e')
             )
-            file_path = self.naming_strategy.generate_unique_filename(file_path, existing_files + list(test_files.keys()))
+            
+            # Use the improved unique filename generator
+            file_path = self.naming_strategy.generate_unique_filename(
+                file_path, 
+                existing_files + list(test_files.keys())
+            )
+            # --- FIX: End ---
             
             content = self._generate_playwright_content(scenario, code_structure)
             test_files[file_path] = content
