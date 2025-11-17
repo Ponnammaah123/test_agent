@@ -10,9 +10,11 @@ from src.routers.validate_test_plan_api import router as validate_test_plan_rout
 from src.routers.attach_test_plan_api import router as attach_test_plan_router
 from src.routers.review_test_plan_api import router as review_test_plan_router
 from src.routers.analyse_codebase_api import router as analyse_codebase_router
-
-# NEW: Import Test Generation Router
 from src.routers.test_generation_api import router as test_generation_router
+
+# NEW: Import the orchestration router
+from src.routers.gather_generate_tests_api import router as gather_generate_tests_router
+
 
 app = FastAPI(
         title="Tools API", 
@@ -27,14 +29,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content=error_response
     )
 
-# Include routers
+# --- Include all routers ---
+
+# NEW: Register the orchestration router
+# This makes the endpoint available at /gather_response_for_generate/tests
+app.include_router(gather_generate_tests_router, tags=["Test Generation Orchestrator"])
+
+
+# Existing routers
 app.include_router(jira_fetcher_router, tags=["Fetch Jira ticket details"], prefix="/jira")
 app.include_router(validate_test_plan_router,  tags=["Test Plan Validation"])
 app.include_router(attach_test_plan_router, tags=["Test Plan Attachment"])
 app.include_router(review_test_plan_router, prefix="/api/v1", tags=["Test Plan Review"])
 app.include_router(analyse_codebase_router, tags=["Analyse code base from Git"])
-
-# NEW: Register Test Generation Router
 app.include_router(test_generation_router, prefix="/api/v1", tags=["Test Generation"])
 
 @app.get("/")
