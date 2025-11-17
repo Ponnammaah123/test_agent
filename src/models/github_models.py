@@ -3,7 +3,7 @@
 # ==============================================
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 @dataclass
 class RepositoryConfig:
@@ -21,6 +21,9 @@ class RepositoryConfig:
     @classmethod
     def from_dict(cls, data: dict) -> 'RepositoryConfig':
         """Create from dictionary"""
+        if not data:
+            return cls(test_environment_url="", api_base_url="")
+            
         # Support both flat and nested structure
         test_env = data.get('test_environment', {})
 
@@ -62,17 +65,38 @@ class RepositoryConfig:
 
 @dataclass
 class CodebaseAnalysis:
-    """Results from code analysis"""
+    """
+    Results from code analysis
+    
+    This model is updated to be flexible for instantiation from a dict,
+    by adding defaults and handling nested dicts in __post_init__.
+    """
+    # Fields that MUST be provided
     repository: str
     branch: str
-    files_changed: List[str]
-    components_identified: List[str]
-    business_logic: Dict[str, str]
-    dependencies: List[str]
     test_coverage: float
+    
+    # Fields that are optional or have defaults
+    # FIX 1: Changed from List[str] to List[Any] to accept List[Dict] from JSON
+    files_changed: List[Any] = field(default_factory=list)
+    
+    components_identified: List[str] = field(default_factory=list)
+    
+    # FIX 2: Added default_factory to fix the "missing positional argument" error
+    business_logic: Dict[str, str] = field(default_factory=dict)
+    dependencies: List[str] = field(default_factory=list)
+    
     repository_config: Optional[RepositoryConfig] = None
     commit_count: int = 0
     last_commit_date: Optional[str] = None
+    
+    def __post_init__(self):
+        """
+        FIX 3: Handle the case where repository_config is passed as a dict
+        from the JSON payload instead of a RepositoryConfig object.
+        """
+        if isinstance(self.repository_config, dict):
+            self.repository_config = RepositoryConfig.from_dict(self.repository_config)
     
     def to_dict(self) -> dict:
         """Convert to dictionary"""

@@ -188,12 +188,31 @@ class TestGenerationAgent:
 
     def _parse_code_structure(self, codebase_analysis: CodebaseAnalysis) -> Dict[str, Any]:
         """Parse code structure using Gemini"""
+        
+        # --- FIX: Start ---
+        # Extract file paths from the list of dictionaries
+        # codebase_analysis.files_changed is List[Dict], not List[str]
+        file_paths = []
+        if isinstance(codebase_analysis.files_changed, list):
+            for file_item in codebase_analysis.files_changed:
+                if isinstance(file_item, dict) and 'path' in file_item:
+                    file_paths.append(file_item['path'])
+                elif isinstance(file_item, str):
+                    # Handle if it's already a string (legacy)
+                    file_paths.append(file_item)
+        
+        files_changed_count = len(file_paths)
+        key_files_str = ', '.join(file_paths[:10])
+        # --- FIX: End ---
+
         prompt = f"""
         Analyze the following codebase for E2E test generation:
         Repository: {codebase_analysis.repository}
         Branch: {codebase_analysis.branch}
         Components: {', '.join(codebase_analysis.components_identified)}
-        Files Changed: {', '.join(codebase_analysis.files_changed)}
+        
+        Files Changed: {files_changed_count} files
+        Key Files: {key_files_str}
         
         Extract: components, routes, api_endpoints, workflows.
         Return JSON.
