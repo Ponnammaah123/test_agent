@@ -6,6 +6,8 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 import hashlib
 import json
+import os
+import re
 
 from src.config.settings import Config
 from src.clients.jira_client import JiraClient
@@ -241,30 +243,63 @@ class TestGenerationAgent:
     def _generate_test_files_with_scope(
         self, jira_ticket, test_plan, code_structure, coverage_gaps, scope_analysis, update_strategy, existing_files
     ) -> Dict[str, str]:
-        """Generate test files mapping"""
+        """Generate test files mapping, skipping duplicates."""
         test_files = {}
+
+        # --- NEW: Parse existing files to find already generated scenario IDs ---
+        logger.info(f"Checking {len(existing_files)} existing files for duplicates...")
+        existing_scenario_ids = set()
+        for file_path in existing_files:
+            try:
+                # Extract filename, e.g., "ts-001.spec.ts"
+                filename = os.path.basename(file_path)
+                # Extract scenario ID, e.g., "ts-001"
+                scenario_id = filename.split('.')[0]
+                
+                # Handle incremented duplicates like "ts-001-1"
+                # This regex checks if the string ends with -<number>
+                if re.match(r".*-\d+$", scenario_id):
+                    scenario_id = scenario_id.rsplit('-', 1)[0]
+                
+                if scenario_id:
+                    existing_scenario_ids.add(scenario_id.lower())
+            except Exception as e:
+                logger.warning(f"Could not parse scenario ID from filename {file_path}: {e}")
         
+        if existing_scenario_ids:
+            logger.info(f"Found existing scenario IDs: {existing_scenario_ids}")
+        # --- END NEW ---
+
         # 1. Generate core scenarios
+        scenarios_generated = 0
+        scenarios_skipped = 0
         for scenario in test_plan.test_scenarios:
+            scenario_id_str = str(scenario.get('id', '')).lower()
+
+            # --- NEW: Check for duplicates ---
+            if scenario_id_str in existing_scenario_ids:
+                logger.warning(f"Skipping scenario {scenario_id_str}: Test file already exists.")
+                scenarios_skipped += 1
+                continue
+            # --- END NEW ---
             
-            # --- FIX: Start ---
-            # Pass the entire scenario object to the naming strategy
             file_path = self.naming_strategy.generate_test_file_path(
                 ticket=jira_ticket, 
                 scenario=scenario,  # Pass the scenario
                 test_type=scenario.get('test_type', 'e2e')
             )
             
-            # Use the improved unique filename generator
+            # This check is now for safety against race conditions or partial runs
             file_path = self.naming_strategy.generate_unique_filename(
                 file_path, 
                 existing_files + list(test_files.keys())
             )
-            # --- FIX: End ---
             
             content = self._generate_playwright_content(scenario, code_structure)
             test_files[file_path] = content
-            
+            scenarios_generated += 1
+        
+        logger.info(f"Test generation complete. Generated: {scenarios_generated} new files. Skipped: {scenarios_skipped} duplicates.")
         return test_files
 
     def _generate_playwright_content(self, scenario, code_structure) -> str:
