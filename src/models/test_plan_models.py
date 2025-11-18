@@ -3,8 +3,9 @@
 # ==============================================
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from src.models.github_models import RepositoryConfig
+import re
 
 @dataclass
 class TestScenario:
@@ -31,17 +32,36 @@ class TestScenario:
 @dataclass
 class TestPlan:
     """Generated test plan"""
+    # Required fields from your payload
     jira_ticket: str
-    strategy: str
-    test_approach: str
-    testable_components: List[str]
     test_scenarios: List[Dict]
-    traceability_matrix: Dict[str, List[str]]
-    coverage_targets: Dict[str, str]
-    confidence_score: float
+
+    # Optional fields (made optional to fix the error)
+    strategy: str = ""
+    test_approach: str = "BDD"
+    testable_components: List[str] = field(default_factory=list)
+    traceability_matrix: Dict[str, List[str]] = field(default_factory=dict)
+    coverage_targets: Dict[str, str] = field(default_factory=dict)
+    
+    # Updated confidence_score to handle string input like "40%"
+    confidence_score: Any = 0.0
+    
     environment_config: Optional[RepositoryConfig] = None
     generated_at: Optional[str] = None
     quality_issues: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Clean up confidence_score after initialization"""
+        if isinstance(self.confidence_score, str):
+            # Remove '%' and other non-numeric characters, then convert to float
+            match = re.search(r'[\d\.]+', self.confidence_score)
+            if match:
+                self.confidence_score = float(match.group(0))
+            else:
+                self.confidence_score = 0.0
+        elif not isinstance(self.confidence_score, (float, int)):
+            # Handle other invalid types
+            self.confidence_score = 0.0
     
     def get_scenario_count(self) -> int:
         """Get total number of test scenarios"""
