@@ -13,6 +13,13 @@ from src.clients.github_client import GitHubClient
 from src.utils.logger import get_logger
 from src.utils.exceptions import JiraClientException, GitHubClientException
 
+# --- NEW IMPORTS ---
+# Import the agent and models needed for generation
+from src.agents.test_generation_agent import TestGenerationAgent
+from src.models.test_plan_models import TestPlan
+from src.models.github_models import CodebaseAnalysis
+# --- END NEW IMPORTS ---
+
 logger = get_logger(__name__)
 router = APIRouter()
 
@@ -23,17 +30,12 @@ class GatherGenerateTestsRequest(BaseModel):
     jira_ticket_key: str = Field(..., description="Jira ticket key (e.g., QEA-19)")
     scope_analysis: Dict[str, Any] = Field(..., description="Scope analysis provided by the user")
 
-class GenerateTestsPayload(BaseModel):
-    """
-    Output model, which matches the input for the /generate/tests endpoint
-    """
-    jira_ticket_key: str
-    test_plan: Dict[str, Any]
-    codebase_analysis: Dict[str, Any]
-    test_repo_url: str
-    scope_analysis: Dict[str, Any]
+# --- MODEL REMOVED ---
+# The GenerateTestsPayload model is no longer needed as an output from this file.
+# --- END MODEL REMOVED ---
 
-# --- Helper Functions ---
+
+# --- Helper Functions (No changes) ---
 
 def _parse_comment_data(comments: List[Dict[str, Any]]) -> Tuple[str, str]:
     """
@@ -162,25 +164,29 @@ def _parse_excel_test_plan(attachments: List[Dict[str, Any]], config: Config) ->
         logger.error(f"Failed to parse Excel file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to parse Excel file: {e}")
 
-# --- API Endpoint ---
+# --- API Endpoint (Modified) ---
 
 @router.post(
     "/gather_response_for_generate/tests",
-    response_model=GenerateTestsPayload,
-    summary="Orchestrate Inputs for Test Generation",
-    description="Gathers all data (Test Plan, Code Analysis) needed to call the /generate/tests endpoint."
+    # --- RESPONSE MODEL CHANGED ---
+    response_model=Dict[str, Any],
+    summary="Orchestrate and Generate Tests",
+    description="Gathers all data AND generates the test code in a single call."
+    # --- END RESPONSE MODEL CHANGED ---
 )
 async def gather_response_for_generate_tests(
     request: GatherGenerateTestsRequest = Body(...)
-) -> GenerateTestsPayload:
+) -> Dict[str, Any]: # --- RETURN TYPE CHANGED ---
     """
-    This endpoint automates the data gathering for the test generation service.
+    This endpoint automates the entire data gathering and generation service.
     
     1. Fetches Jira ticket details (comments, attachments).
     2. Parses comments for the Git branch and Test Repo URL.
     3. Downloads and parses the `.xlsx` Test Plan attachment.
     4. Calls the `/analyze-codebase` logic with the found branch.
-    5. Assembles and returns the complete payload.
+    5. Initializes the TestGenerationAgent.
+    6. Calls the agent's generate_tests method.
+    7. Assembles and returns the final generated test files.
     """
     
     try:
@@ -188,14 +194,12 @@ async def gather_response_for_generate_tests(
         config.validate()
         
         jira_ticket_key = request.jira_ticket_key
-        logger.info(f"[{jira_ticket_key}] Starting data gathering...")
+        logger.info(f"[{jira_ticket_key}] Starting full test generation orchestration...")
         
         # --- Step 1: Fetch Jira Data ---
         jira_client = JiraClient(config)
         
-        logger.info(f"[{jira_ticket_key}] Fetching comments and attachments...")
-        # Note: These are blocking I/O calls. In a high-concurrency app,
-        # they should be made async or run in a threadpool.
+        logger.info(f"[{jira_ticket_key}] (1/5) Fetching comments and attachments...")
         comments = jira_client.get_comments(jira_ticket_key, top_n=10) # Get latest 10
         attachments = jira_client.get_attachments(jira_ticket_key)
         
@@ -206,34 +210,55 @@ async def gather_response_for_generate_tests(
             )
 
         # --- Step 2: Parse Comments for Branch & Repo URL ---
-        logger.info(f"[{jira_ticket_key}] Parsing comment data...")
+        logger.info(f"[{jira_ticket_key}] (2/5) Parsing comment data...")
         branch, test_repo_url = _parse_comment_data(comments)
 
         # --- Step 3: Parse Test Plan from Excel Attachment ---
-        logger.info(f"[{jira_ticket_key}] Parsing test plan from Excel attachment...")
-        # --- FIX: Pass config for authentication ---
+        logger.info(f"[{jira_ticket_key}] (3/5) Parsing test plan from Excel attachment...")
         test_plan = _parse_excel_test_plan(attachments, config)
         
         # --- Step 4: Get Codebase Analysis ---
-        logger.info(f"[{jira_ticket_key}] Analyzing codebase for branch: {branch}...")
+        logger.info(f"[{jira_ticket_key}] (4/5) Analyzing codebase for branch: {branch}...")
         github_client = GitHubClient(config)
         
-        # This call handles its own caching per github_client.py
         codebase_analysis_obj = github_client.analyze_codebase(branch)
         codebase_analysis = codebase_analysis_obj.model_dump()
         logger.info(f"[{jira_ticket_key}] Codebase analysis complete.")
 
-        # --- Step 5: Assemble Final Payload ---
-        final_payload = GenerateTestsPayload(
+        # --- Step 5: (NEW) Call Test Generation Agent ---
+        logger.info(f"[{jira_ticket_key}] (5/5) Initializing and running Test Generation Agent...")
+        
+        # Initialize Agent
+        agent = TestGenerationAgent(config)
+
+        # Convert Dictionary inputs to Domain Models
+        try:
+            test_plan_obj = TestPlan(**test_plan)
+            codebase_analysis_obj_typed = CodebaseAnalysis(**codebase_analysis)
+        except Exception as e:
+            logger.error(f"Failed to parse models for agent: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid data for agent models: {e}")
+
+        # Determine Test Repo URL
+        target_repo_url = test_repo_url # Use the one parsed from comments
+
+        # Execute Generation
+        result = await agent.generate_tests(
             jira_ticket_key=jira_ticket_key,
-            test_plan=test_plan,
-            codebase_analysis=codebase_analysis,
-            test_repo_url=test_repo_url,
+            test_plan=test_plan_obj,
+            codebase_analysis=codebase_analysis_obj_typed,
+            test_repo_url=target_repo_url,
             scope_analysis=request.scope_analysis
         )
-        
-        logger.info(f"[{jira_ticket_key}] Data gathering complete. Returning payload.")
-        return final_payload
+
+        logger.info(f"[{jira_ticket_key}] Orchestration and generation complete. Returning final response.")
+
+        # Return the response from the generation step
+        return {
+            "status": "success",
+            "message": f"Generated {len(result.get('test_files', {}))} test files",
+            "data": result
+        }
         
     except HTTPException:
         raise # Re-raise known HTTP exceptions
