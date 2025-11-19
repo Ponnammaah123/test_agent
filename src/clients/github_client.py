@@ -18,6 +18,8 @@ from urllib3.util.retry import Retry
 from src.config.settings import Config
 import hashlib
 import base64
+import json
+from datetime import datetime
 
 # Import caching system
 from src.clients.github_client_cache import (
@@ -54,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 class GitHubClient:
-    """Client for interacting with Git services (GitHub, GitLab, etc.) with caching"""
+    """Client for interacting with Git services (GitHub, GitLab, etc.) with caching and WRITE capability"""
     
     def __init__(self, config: Config, enable_cache: bool = True, cache_ttl: int = 3600):
         """
@@ -121,7 +123,31 @@ class GitHubClient:
         
         logger.info(" Session with retry logic ")
         return session
-    
+
+    # --- NEW: Helper for API requests ---
+    def _make_github_request(self, method: str, path: str, data: Optional[Dict[str, Any]] = None, json_body: bool = True) -> Dict[str, Any]:
+        """Generic method to handle GitHub API requests."""
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/{path}"
+        headers = {
+            "Authorization": f"token {self.pat_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        try:
+            if json_body:
+                response = self.session.request(method, url, headers=headers, json=data, timeout=60)
+            else:
+                response = self.session.request(method, url, headers=headers, data=data, timeout=60)
+            
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"GitHub API Error ({method} {path}): {e.response.status_code} - {e.response.text[:200]}")
+            raise requests.exceptions.HTTPError(f"GitHub API operation failed: {e}", response=e.response)
+        except Exception as e:
+            logger.error(f"GitHub Request Error ({method} {path}): {e}")
+            raise
+
     def _detect_git_service(self) -> str:
         """Detect which Git service is being used"""
         if "github.com" in self.repo_url.lower():
@@ -154,13 +180,188 @@ class GitHubClient:
             logger.error(f"Failed to parse repo URL: {str(e)}")
             raise
     
+    # --- Existing (Modified to private) ---
+    def _get_latest_commit_sha(self, branch: str) -> str:
+        """Get latest commit SHA for a branch"""
+        try:
+            if self.git_service == "github":
+                url = f"https://api.github.com/repos/{self.owner}/{self.repo}/commits"
+                headers = {"Authorization": f"token {self.pat_token}"}
+                response = self.session.get(
+                    url,
+                    params={"sha": branch, "per_page": 1},
+                    headers=headers,
+                    timeout=30
+                )
+                response.raise_for_status()
+                commits = response.json()
+                return commits[0]['sha'] if commits else "unknown"
+            else:
+                # Fallback to existing GitLab logic or raise if not implemented
+                return self._get_latest_commit_id(branch) # Uses existing method
+        except Exception as e:
+            logger.warning(f"Could not get commit SHA for {branch}: {e}")
+            raise # Raise to fail commit process if base sha is missing
+    
+    # --- NEW: Git Write Operations ---
+    
+    def create_branch(self, new_branch: str, base_branch: str) -> str:
+        """Creates a new branch referencing the latest commit of the base branch."""
+        if self.git_service != "github":
+            raise NotImplementedError("Branch creation is only implemented for GitHub.")
+
+        logger.info(f"Creating new branch '{new_branch}' from '{base_branch}'")
+        
+        # 1. Get SHA of the base branch
+        base_sha = self._get_latest_commit_sha(base_branch)
+        if base_sha == "unknown":
+            raise ValueError(f"Could not find latest commit for base branch '{base_branch}'.")
+
+        # 2. Create the reference (branch)
+        ref_path = f"refs/heads/{new_branch}"
+        data = {"ref": ref_path, "sha": base_sha}
+        
+        response = self._make_github_request("POST", "git/refs", data)
+        return response['object']['sha']
+
+    def push_files_to_branch(self, base_branch: str, new_branch: str, file_map: Dict[str, str], commit_message: str) -> str:
+        """Commits multiple files to a new branch."""
+        if self.git_service != "github":
+            raise NotImplementedError("File commit is only implemented for GitHub.")
+        
+        # 1. Get SHA of the new branch (which is the parent commit)
+        parent_sha = self._get_latest_commit_sha(new_branch)
+        if parent_sha == "unknown":
+            raise ValueError(f"Could not find latest commit for new branch '{new_branch}'.")
+
+        # 2. Get the SHA of the current tree
+        parent_commit_details = self._make_github_request("GET", f"commits/{parent_sha}")
+        base_tree_sha = parent_commit_details['commit']['tree']['sha']
+
+        # 3. Create Blobs and Tree Items
+        tree_items = []
+        for file_path, content in file_map.items():
+            # Create a blob for the file content
+            blob_data = {
+                "content": content,
+                "encoding": "utf-8"
+            }
+            blob_response = self._make_github_request("POST", "git/blobs", blob_data)
+            blob_sha = blob_response['sha']
+
+            # Prepare the tree item
+            tree_items.append({
+                "path": file_path,
+                "mode": "100644",  # file mode (blob)
+                "type": "blob",
+                "sha": blob_sha
+            })
+
+        # 4. Create the new tree
+        tree_data = {
+            "base_tree": base_tree_sha,
+            "tree": tree_items
+        }
+        new_tree_response = self._make_github_request("POST", "git/trees", tree_data)
+        new_tree_sha = new_tree_response['sha']
+
+        # 5. Create the new commit
+        commit_data = {
+            "message": commit_message,
+            "tree": new_tree_sha,
+            "parents": [parent_sha]
+        }
+        new_commit_response = self._make_github_request("POST", "git/commits", commit_data)
+        new_commit_sha = new_commit_response['sha']
+
+        # 6. Update the branch reference (HEAD)
+        ref_path = f"heads/{new_branch}"
+        update_data = {"sha": new_commit_sha}
+        self._make_github_request("PATCH", f"git/refs/{ref_path}", update_data)
+
+        logger.info(f"Successfully committed {len(file_map)} files to branch {new_branch}.")
+        return new_commit_sha
+
+    def create_pull_request(self, head_branch: str, base_branch: str, title: str, body: str) -> Dict[str, Any]:
+        """Creates a Pull Request between two branches."""
+        if self.git_service != "github":
+            raise NotImplementedError("PR creation is only implemented for GitHub.")
+
+        logger.info(f"Creating PR from {head_branch} to {base_branch}")
+        
+        pr_data = {
+            "title": title,
+            "head": head_branch,
+            "base": base_branch,
+            "body": body
+        }
+        
+        response = self._make_github_request("POST", "pulls", pr_data)
+        logger.info(f"Successfully created PR: {response['html_url']}")
+        return {
+            "pr_url": response['html_url'],
+            "pr_number": response['number']
+        }
+
+    # --- NEW: PR Query/Update Operations ---
+
+    def find_open_pr_by_jira_key(self, jira_key: str, base_branch: str = "main") -> Optional[Dict[str, Any]]:
+        """Searches for an open PR with the Jira key in its title or head branch."""
+        if self.git_service != "github":
+            return None
+
+        pr_title_prefix = f"{jira_key}:"
+        jira_key_lower = jira_key.lower()
+        fixed_branch_name = f"features/{jira_key_lower}" # The new non-timestamped branch name
+        
+        # Query the PR endpoint, filtered by state and base branch
+        try:
+            pulls = self._make_github_request("GET", "pulls", data={
+                'state': 'open',
+                'base': base_branch,
+            }, json_body=False)
+            
+            # Filter results for the exact ticket prefix in the title or the fixed branch name
+            for pr in pulls:
+                head_ref = pr['head']['ref']
+                # Check 1: Head branch name is the exact expected fixed name
+                if head_ref == fixed_branch_name:
+                    logger.info(f"Found existing open PR #{pr['number']} by exact branch name for {jira_key}.")
+                    return {
+                        'number': pr['number'],
+                        'html_url': pr['html_url'],
+                        'head_ref': head_ref
+                    }
+                # Check 2: PR title matches the Jira key prefix (Fallback for older PRs)
+                elif pr['title'].startswith(pr_title_prefix):
+                    logger.info(f"Found existing open PR #{pr['number']} by title prefix for {jira_key}.")
+                    return {
+                        'number': pr['number'],
+                        'html_url': pr['html_url'],
+                        'head_ref': head_ref
+                    }
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to search for existing PRs: {e}")
+            return None
+
+    def update_pr_body(self, pr_number: int, body_content: str) -> None:
+        """Updates the body of an existing PR."""
+        if self.git_service != "github":
+            return
+        
+        logger.info(f"Updating body for existing PR #{pr_number}.")
+        self._make_github_request("PATCH", f"pulls/{pr_number}", data={"body": body_content})
+
+    # --- Existing Read Methods (Reconstructed fully) ---
+    
     def analyze_codebase(self, branch: str) -> CodebaseAnalysisResponse:
         """
         Analyze codebase for a given branch with caching
         
         Args:
             branch: Git branch name (e.g., "main", "feature/TP-1")
-        
+            
         Returns:
             CodebaseAnalysisResponse with analysis results
         """
@@ -245,7 +446,7 @@ class GitHubClient:
         except Exception as e:
             logger.error(f"Error during codebase analysis: {str(e)}", exc_info=True)
             raise
-    
+
     def _get_files_changed(self, branch: str) -> List[FileChange]:
         """Get files changed in a branch"""
         try:
@@ -795,8 +996,9 @@ class GitHubClient:
     
     def clear_cache(self) -> None:
         """Clear all cache"""
-        if self.cache:
-            self.cache.clear()
+        if not self.cache:
+            return 
+        self.cache.clear()
     
     def invalidate_branch_cache(self, branch: str) -> bool:
         """Invalidate cache for specific branch"""
