@@ -303,6 +303,56 @@ class GitHubClient:
             "pr_number": response['number']
         }
 
+    # --- NEW: PR Query/Update Operations ---
+
+    def find_open_pr_by_jira_key(self, jira_key: str, base_branch: str = "main") -> Optional[Dict[str, Any]]:
+        """Searches for an open PR with the Jira key in its title or head branch."""
+        if self.git_service != "github":
+            return None
+
+        pr_title_prefix = f"{jira_key}:"
+        jira_key_lower = jira_key.lower()
+        fixed_branch_name = f"features/{jira_key_lower}" # The new non-timestamped branch name
+        
+        # Query the PR endpoint, filtered by state and base branch
+        try:
+            pulls = self._make_github_request("GET", "pulls", data={
+                'state': 'open',
+                'base': base_branch,
+            }, json_body=False)
+            
+            # Filter results for the exact ticket prefix in the title or the fixed branch name
+            for pr in pulls:
+                head_ref = pr['head']['ref']
+                # Check 1: Head branch name is the exact expected fixed name
+                if head_ref == fixed_branch_name:
+                    logger.info(f"Found existing open PR #{pr['number']} by exact branch name for {jira_key}.")
+                    return {
+                        'number': pr['number'],
+                        'html_url': pr['html_url'],
+                        'head_ref': head_ref
+                    }
+                # Check 2: PR title matches the Jira key prefix (Fallback for older PRs)
+                elif pr['title'].startswith(pr_title_prefix):
+                    logger.info(f"Found existing open PR #{pr['number']} by title prefix for {jira_key}.")
+                    return {
+                        'number': pr['number'],
+                        'html_url': pr['html_url'],
+                        'head_ref': head_ref
+                    }
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to search for existing PRs: {e}")
+            return None
+
+    def update_pr_body(self, pr_number: int, body_content: str) -> None:
+        """Updates the body of an existing PR."""
+        if self.git_service != "github":
+            return
+        
+        logger.info(f"Updating body for existing PR #{pr_number}.")
+        self._make_github_request("PATCH", f"pulls/{pr_number}", data={"body": body_content})
+
     # --- Existing Read Methods (Reconstructed fully) ---
     
     def analyze_codebase(self, branch: str) -> CodebaseAnalysisResponse:
@@ -581,6 +631,40 @@ class GitHubClient:
                 cached_files.append(cached_file)
         
         return cached_files
+    
+    def _get_file_content(self, file_path: str, branch: str) -> Optional[str]:
+        """Fetch file content from Git"""
+        try:
+            if self.git_service == "github":
+                headers = {"Authorization": f"token {self.pat_token}"}
+                url = f"https://api.github.com/repos/{self.owner}/{self.repo}/contents/{file_path}"
+                response = self.session.get(url, params={"ref": branch}, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                data = response.json()
+                if 'content' in data and data['size'] < 1_000_000:
+                    try:
+                        content = base64.b64decode(data['content']).decode('utf-8')
+                        return content
+                    except (UnicodeDecodeError, ValueError):
+                        return None
+            else:
+                headers = {"PRIVATE-TOKEN": self.pat_token}
+                project_id = f"{self.owner}%2F{self.repo}"
+                file_path_encoded = file_path.replace('/', '%2F')
+                
+                url = f"https://pscode.lioncloud.net/api/v4/projects/{project_id}/repository/files/{file_path_encoded}/raw"
+                response = self.session.get(url, params={"ref": branch}, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                content = response.text
+                if len(content.encode('utf-8')) < 1_000_000:
+                    return content
+                    
+        except Exception as e:
+            logger.debug(f"Could not fetch content for {file_path}: {e}")
+        
+        return None
     
     def _get_file_content_at_parent(self, file_path: str, branch: str) -> Optional[str]:
         """Get file content from parent commit"""
