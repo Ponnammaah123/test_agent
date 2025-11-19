@@ -13,12 +13,10 @@ from src.clients.github_client import GitHubClient
 from src.utils.logger import get_logger
 from src.utils.exceptions import JiraClientException, GitHubClientException
 
-# --- NEW IMPORTS ---
 # Import the agent and models needed for generation
 from src.agents.test_generation_agent import TestGenerationAgent
 from src.models.test_plan_models import TestPlan
 from src.models.github_models import CodebaseAnalysis
-# --- END NEW IMPORTS ---
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -30,12 +28,8 @@ class GatherGenerateTestsRequest(BaseModel):
     jira_ticket_key: str = Field(..., description="Jira ticket key (e.g., QEA-19)")
     scope_analysis: Dict[str, Any] = Field(..., description="Scope analysis provided by the user")
 
-# --- MODEL REMOVED ---
-# The GenerateTestsPayload model is no longer needed as an output from this file.
-# --- END MODEL REMOVED ---
 
-
-# --- Helper Functions (No changes) ---
+# --- Helper Functions ---
 
 def _parse_comment_data(comments: List[Dict[str, Any]]) -> Tuple[str, str]:
     """
@@ -98,11 +92,9 @@ def _parse_excel_test_plan(attachments: List[Dict[str, Any]], config: Config) ->
         # Download the Excel file
         logger.info(f"Downloading Excel file from: {excel_url}")
         
-        # --- FIX: Add authentication to the download request ---
         # Jira attachments require the same auth as the API.
         jira_auth = (config.jira.email, config.jira.api_token)
         response = requests.get(excel_url, auth=jira_auth)
-        # --- End of FIX ---
         
         response.raise_for_status()
         
@@ -148,14 +140,12 @@ def _parse_excel_test_plan(attachments: List[Dict[str, Any]], config: Config) ->
             "test_approach": overview_data.get('test_approach', ''),
             "confidence_score": overview_data.get('confidence_score', 0.0),
             "test_scenarios": scenarios,
-            # Note: Other fields like traceability_matrix are not in the Excel, so they are omitted
         }
         
         return test_plan
 
     except requests.RequestException as e:
         logger.error(f"Failed to download Excel file: {e}")
-        # Pass the error response text if available
         error_detail = f"Failed to download attachment: {e}"
         if e.response is not None:
              error_detail = f"Failed to download attachment: {e.response.status_code} {e.response.reason} for url: {excel_url}"
@@ -164,29 +154,19 @@ def _parse_excel_test_plan(attachments: List[Dict[str, Any]], config: Config) ->
         logger.error(f"Failed to parse Excel file: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to parse Excel file: {e}")
 
-# --- API Endpoint (Modified) ---
+# --- API Endpoint ---
 
 @router.post(
     "/gather_response_for_generate/tests",
-    # --- RESPONSE MODEL CHANGED ---
     response_model=Dict[str, Any],
     summary="Orchestrate and Generate Tests",
     description="Gathers all data AND generates the test code in a single call."
-    # --- END RESPONSE MODEL CHANGED ---
 )
 async def gather_response_for_generate_tests(
     request: GatherGenerateTestsRequest = Body(...)
-) -> Dict[str, Any]: # --- RETURN TYPE CHANGED ---
+) -> Dict[str, Any]:
     """
     This endpoint automates the entire data gathering and generation service.
-    
-    1. Fetches Jira ticket details (comments, attachments).
-    2. Parses comments for the Git branch and Test Repo URL.
-    3. Downloads and parses the `.xlsx` Test Plan attachment.
-    4. Calls the `/analyze-codebase` logic with the found branch.
-    5. Initializes the TestGenerationAgent.
-    6. Calls the agent's generate_tests method.
-    7. Assembles and returns the final generated test files.
     """
     
     try:
@@ -200,7 +180,7 @@ async def gather_response_for_generate_tests(
         jira_client = JiraClient(config)
         
         logger.info(f"[{jira_ticket_key}] (1/5) Fetching comments and attachments...")
-        comments = jira_client.get_comments(jira_ticket_key, top_n=10) # Get latest 10
+        comments = jira_client.get_comments(jira_ticket_key, top_n=10)
         attachments = jira_client.get_attachments(jira_ticket_key)
         
         if not comments or not attachments:
@@ -217,15 +197,73 @@ async def gather_response_for_generate_tests(
         logger.info(f"[{jira_ticket_key}] (3/5) Parsing test plan from Excel attachment...")
         test_plan = _parse_excel_test_plan(attachments, config)
         
-        # --- Step 4: Get Codebase Analysis ---
-        logger.info(f"[{jira_ticket_key}] (4/5) Analyzing codebase for branch: {branch}...")
+        # --- Step 4: Get Codebase Analysis (CORRECTED) ---
+        # FIX: Force 'main' branch (or 'master') for App Repo Analysis 
+        # to avoid 404s when looking for test branches in the app repo.
+        target_app_branch = "main" 
+        
+        logger.info(f"[{jira_ticket_key}] (4/5) Fetching ALL files from branch: {target_app_branch}...")
         github_client = GitHubClient(config)
         
-        codebase_analysis_obj = github_client.analyze_codebase(branch)
-        codebase_analysis = codebase_analysis_obj.model_dump()
-        logger.info(f"[{jira_ticket_key}] Codebase analysis complete.")
+        # 1. Fetch all files (returns dict {path: content})
+        # This bypasses the diff logic and gets everything.
+        all_files_content = github_client.get_all_files_in_branch(target_app_branch)
+        
+        # 2. Manually construct the 'files_changed' list expected by CodebaseAnalysis
+        # We treat ALL files as "changed" so the agent sees everything.
+        files_list = []
+        for path, content in all_files_content.items():
+            files_list.append({
+                "path": path,
+                "status": "existing", # Dummy status
+                "additions": 0,
+                "deletions": 0,
+                "content": content 
+            })
+            
+            # CRITICAL: Pre-populate the cache. 
+            # The Agent (Step 5) uses `get_cached_file_content`, so we must inject this data 
+            # into the cache now, otherwise the Agent will find nothing.
+            if github_client.cache:
+                from src.clients.github_client_cache import CachedFile, CachedAnalysis
+                import datetime
+                
+                cached_file = CachedFile(
+                    path=path,
+                    status="existing",
+                    content=content,
+                    file_size_bytes=len(content)
+                )
+                
+                # Ensure an analysis object exists for this branch in the cache
+                cache_key = f"{github_client.repo}:{target_app_branch}"
+                if cache_key not in github_client.cache.cache:
+                     analysis = CachedAnalysis(
+                         repository=github_client.repo,
+                         branch=target_app_branch,
+                         commit_id="latest",
+                         files={}
+                     )
+                     github_client.cache.cache[cache_key] = analysis
+                     github_client.cache.access_times[cache_key] = datetime.datetime.now()
+                
+                # Inject file into the analysis object
+                github_client.cache.cache[cache_key].files[path] = cached_file
 
-        # --- Step 5: (NEW) Call Test Generation Agent ---
+        logger.info(f"[{jira_ticket_key}] Successfully fetched and cached {len(files_list)} files.")
+
+        # 3. Create the CodebaseAnalysis object
+        # This manually creating the object ensures we don't need to change the Model definition.
+        codebase_analysis_obj = CodebaseAnalysis(
+            repository=config.github.repo,
+            branch=target_app_branch,
+            test_coverage=0.0, # Dummy value
+            files_changed=files_list, # Pass all files here
+            components_identified=[],
+            commit_count=1
+        )
+
+        # --- Step 5: Call Test Generation Agent ---
         logger.info(f"[{jira_ticket_key}] (5/5) Initializing and running Test Generation Agent...")
         
         # Initialize Agent
@@ -234,26 +272,26 @@ async def gather_response_for_generate_tests(
         # Convert Dictionary inputs to Domain Models
         try:
             test_plan_obj = TestPlan(**test_plan)
-            codebase_analysis_obj_typed = CodebaseAnalysis(**codebase_analysis)
+            # codebase_analysis_obj is already an object
         except Exception as e:
             logger.error(f"Failed to parse models for agent: {e}")
             raise HTTPException(status_code=400, detail=f"Invalid data for agent models: {e}")
 
         # Determine Test Repo URL
-        target_repo_url = test_repo_url # Use the one parsed from comments
+        target_repo_url = test_repo_url 
 
         # Execute Generation
+        # The agent will now find the files in the cache because we injected them above.
         result = await agent.generate_tests(
             jira_ticket_key=jira_ticket_key,
             test_plan=test_plan_obj,
-            codebase_analysis=codebase_analysis_obj_typed,
+            codebase_analysis=codebase_analysis_obj, 
             test_repo_url=target_repo_url,
             scope_analysis=request.scope_analysis
         )
 
         logger.info(f"[{jira_ticket_key}] Orchestration and generation complete. Returning final response.")
 
-        # Return the response from the generation step
         return {
             "status": "success",
             "message": f"Generated {len(result.get('test_files', {}))} test files",
@@ -261,7 +299,7 @@ async def gather_response_for_generate_tests(
         }
         
     except HTTPException:
-        raise # Re-raise known HTTP exceptions
+        raise 
     except (JiraClientException, GitHubClientException) as e:
         logger.error(f"[{request.jira_ticket_key}] Client Error: {e}")
         raise HTTPException(status_code=502, detail=f"Client Error: {e}")
