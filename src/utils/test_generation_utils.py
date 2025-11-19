@@ -51,9 +51,14 @@ class TestFileNamingStrategy:
     
     def generate_test_file_path(self, ticket: JiraTicket, scenario: Dict[str, Any], test_type: str) -> str:
         """
-        FIXED: Generates a unique path for each scenario using its ID.
+        MODIFIED: Generates a path based on Parent/Jira ID nesting: 
+        tests/e2e/<parent jira id>/<parent jira id>/<jira id>-<scenario id>.spec.ts
         """
-        clean_key = ticket.key.lower()
+        current_key = ticket.key.lower()
+        
+        # Determine parent key for nesting. Use current key if no explicit parent is set.
+        # This creates the desired path structure (e.g., QEA-18/QEA-18).
+        parent_key = ticket.parent_key.lower() if ticket.parent_key else current_key
         
         # Get scenario ID, default to a random string if not present
         scenario_id_raw = scenario.get('id')
@@ -63,8 +68,14 @@ class TestFileNamingStrategy:
         # Sanitize ID (e.g., "TS-001" -> "ts-001")
         clean_scenario_id = str(scenario_id_raw).lower().replace(" ", "-").replace("_", "-")
 
-        # e.g. tests/e2e/qea-19/ts-001.spec.ts
-        return f"tests/e2e/{clean_key}/{clean_scenario_id}.spec.ts"
+        # Construct the requested nested folder structure: <parent>/<parent>/
+        file_path_prefix = f"tests/e2e/{parent_key}/{parent_key}"
+        
+        # The filename itself includes the current ticket key and scenario ID
+        # e.g., qea-20-ts-001.spec.ts
+        filename = f"{current_key}-{clean_scenario_id}.spec.ts"
+
+        return f"{file_path_prefix}/{filename}"
     
     def generate_unique_filename(self, base_path: str, existing_files: List[str]) -> str:
         """
